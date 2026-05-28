@@ -1,0 +1,17 @@
+# Never commit these
+node_modules/
+.env
+.env.local
+.env.production
+
+# Build output
+dist/
+build/
+
+# Editor
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
