@@ -1,55 +1,38 @@
 // index.js — Express server entry point
-//
-// This is the file that starts everything.
-// It wires together:
-//   - Express middleware (cors, json parsing)
-//   - All routes
-//   - The server listener
 
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 
-// Load .env variables FIRST before any other imports that need them
 dotenv.config();
 
-// Import routes
+// ── Import routes ─────────────────────────────────────────────
 import healthRouter from "./routes/health.js";
+import askRouter from "./routes/ask.js"; // 🆕 ADD THIS LINE
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
 // ── Middleware ────────────────────────────────────────────────
-// Middleware runs on EVERY request before it hits a route.
-
-// CORS: allows your frontend (localhost:5173) to call this backend
 app.use(
   cors({
-    origin: [
-      "http://localhost:5173", // Vite dev server
-      "http://localhost:4173", // Vite preview
-    ],
+    origin: ["http://localhost:5173", "http://localhost:4173"],
     credentials: true,
   }),
 );
 
-// JSON parser: lets us read req.body as a JS object
 app.use(express.json());
 
-// Request logger: prints every incoming request to the terminal
-// Very useful during development to see what's happening
 app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
-  next(); // "next" means: continue to the actual route handler
+  next();
 });
 
 // ── Routes ────────────────────────────────────────────────────
-// Mount each router at its base path.
-// All routes in health.js will be prefixed with /health
-
 app.use("/health", healthRouter);
+app.use("/api/ask", askRouter); // 🆕 ADD THIS LINE
 
-// 404 handler — catches any request to a route that doesn't exist
+// ── 404 handler ───────────────────────────────────────────────
 app.use((req, res) => {
   res.status(404).json({
     error: "Route not found",
@@ -57,7 +40,7 @@ app.use((req, res) => {
   });
 });
 
-// Global error handler — catches any unhandled errors in routes
+// ── Global error handler ──────────────────────────────────────
 app.use((err, req, res, next) => {
   console.error("[Error]", err.message);
   res.status(500).json({
@@ -66,7 +49,7 @@ app.use((err, req, res, next) => {
   });
 });
 
-// ── Start the server ──────────────────────────────────────────
+// ── Start server ──────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`
 ╔════════════════════════════════════╗
