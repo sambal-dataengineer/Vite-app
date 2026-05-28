@@ -13,6 +13,8 @@ import { routeLLM } from "../config/llmRouter.js";
 
 import { findBestMatch } from "../services/placesMatcher.js";
 
+import { generateReply } from "../services/replyGenerator.js";
+
 const router = express.Router();
 
 // ─────────────────────────────────────────────
@@ -228,13 +230,16 @@ router.post("/", async (req, res) => {
       });
     }
 
-    // We have a winner — return it with full place details
+    // We have a winner — generate a human reply, then return
+    console.log("[ask] Generating LLM reply for:", bestMatch.name);
+    const reply = await generateReply(bestMatch, safeIntent, trimmedMessage);
+
     return res.json({
       success: true,
       message: trimmedMessage,
-      reply: `Here's my pick: **${bestMatch.name}**`,
-      place: bestMatch, // full place object — name, address, tags, etc.
-      intent: safeIntent, // keep this for debugging on the frontend
+      reply, // ← now LLM-generated, not hardcoded
+      place: bestMatch,
+      intent: safeIntent,
       _meta: { provider, model, time_injected: timeString },
     });
   } catch (error) {

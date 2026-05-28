@@ -335,7 +335,9 @@ function scoreAndPick(candidates, intent) {
     return { ...place, _score: score };
   });
 
-  scored.sort((a, b) => b._score - a._score);
+  // Intentional shuffle among top-tied places
+  // Adds a tiny random nudge so tied scores don't always follow DB row order
+  scored.sort((a, b) => b._score - a._score || Math.random() - 0.5);
 
   console.log(
     "[placesMatcher] Top 5 scored places:",
