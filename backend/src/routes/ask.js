@@ -11,6 +11,8 @@ import express from "express";
 // routeLLM(systemPrompt, userPrompt) → { text, provider, model }
 import { routeLLM } from "../config/llmRouter.js";
 
+import { findBestMatch } from "../services/placesMatcher.js";
+
 const router = express.Router();
 
 // ─────────────────────────────────────────────
@@ -190,18 +192,39 @@ router.post("/", async (req, res) => {
     }
 
     // ── 7. Return the structured intent ───────────────────────
+    // ── 7. Log the final intent ────────────────────────────────
     console.log("[ask] Final intent:", safeIntent);
 
-    res.json({
+    // ── 8. Query Supabase for the best matching place ──────────
+    // findBestMatch() takes the intent object and runs a scored
+    // Supabase query — hard filters first, then soft scoring.
+    // It returns ONE place object, or null if nothing fits.
+    console.log("[ask] Querying Supabase for best match...");
+    const bestMatch = await findBestMatch(safeIntent);
+
+    // ── 9. Return the recommendation ──────────────────────────
+    if (!bestMatch) {
+      // Graceful fallback — DB had no match for this intent
+      // This is NOT an error — it's a valid "no result" state
+      return res.json({
+        success: true,
+        message: trimmedMessage,
+        reply:
+          "Hmm, couldn't find a perfect spot for that. Try describing your mood differently?",
+        place: null,
+        intent: safeIntent,
+        _meta: { provider, model, time_injected: timeString },
+      });
+    }
+
+    // We have a winner — return it with full place details
+    return res.json({
       success: true,
       message: trimmedMessage,
-      intent: safeIntent,
-      _meta: {
-        // Useful during development to see which LLM answered
-        provider,
-        model,
-        time_injected: timeString,
-      },
+      reply: `Here's my pick: **${bestMatch.name}**`,
+      place: bestMatch, // full place object — name, address, tags, etc.
+      intent: safeIntent, // keep this for debugging on the frontend
+      _meta: { provider, model, time_injected: timeString },
     });
   } catch (error) {
     // Handle the "all providers exhausted" case gracefully
