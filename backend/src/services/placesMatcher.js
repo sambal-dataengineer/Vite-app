@@ -1,76 +1,190 @@
-// src/services/placesMatcher.js
-// --------------------------------------------------
-// THE HEART OF VIBE'S MATCHING LOGIC
-//
-// This file answers ONE question:
-// "Given what the user wants, which single place fits best?"
-//
-// Strategy:
-//   1. Use hard filters to eliminate non-matches (wrong category, closed, over budget)
-//   2. Score remaining places by how well they match soft criteria (vibe, noise, tags)
-//   3. Return the highest-scoring place
-//
-// WHY NOT JUST USE SQL ORDER BY RANDOM()?
-// Because random picks often feel wrong. A user asking for a "quiet study spot"
-// shouldn't get a random cafe — they should get the one tagged 'quiet' + 'wifi'.
-// Scoring makes the recommendation feel intelligent, not accidental.
-// --------------------------------------------------
+// src/services/placesMatcher.js  v3
+// Fixes: budget column name, category mapping, mood scoring, keyword aliases
 
 import supabase from "../config/supabase.js";
 
 // --------------------------------------------------
-// BUDGET MAP
-// The LLM returns budget as "low" / "medium" / "high"
-// Our DB stores it as budget_tier: 1, 2, or 3
-// This map translates between the two
+// CATEGORY MAP
+// LLM speaks: "cafe", "restaurant", "bar", "park", "activity"
+// DB stores:  "Cafe", "Restaurant", "Bar", "Park",
+//             "Outdoors", "Work & Study", "Unique & Special"
+//
+// We map LLM categories → one or more DB categories to query
 // --------------------------------------------------
-const BUDGET_TIER_MAP = {
-  low: [1], // budget: only tier-1 places
-  medium: [1, 2], // medium: tier 1 or 2
-  high: [1, 2, 3], // high: any tier is fine
+const CATEGORY_MAP = {
+  cafe: ["Cafe"],
+  restaurant: ["Restaurant"],
+  bar: ["Bar"],
+  park: ["Park", "Outdoors"],
+  outdoors: ["Outdoors", "Park"],
+  activity: ["Unique & Special", "Work & Study", "Outdoors"],
+  work: ["Work & Study", "Cafe"],
+  study: ["Work & Study", "Cafe"],
+  unique: ["Unique & Special"],
 };
 
 // --------------------------------------------------
-// MAIN FUNCTION: findBestMatch(intent)
-//
-// intent shape (from LLM):
-// {
-//   category: "cafe" | "restaurant" | "park" | "bar" | etc,
-//   budget: "low" | "medium" | "high",
-//   vibe_tags: ["quiet", "cozy", "work-friendly"],   ← array
-//   noise_level: "quiet" | "moderate" | "lively",
-//   time_of_day: "morning" | "afternoon" | "evening" | "night"
-// }
+// BUDGET MAP
+// LLM speaks: "low", "medium", "high"
+// DB stores:  budget TEXT — 'Free', '₹', '₹₹', '₹₹₹', '₹₹₹₹'
+// --------------------------------------------------
+const BUDGET_MAP = {
+  low: ["Free", "₹"],
+  medium: ["Free", "₹", "₹₹"],
+  high: ["Free", "₹", "₹₹", "₹₹₹", "₹₹₹₹"],
+};
+
+// --------------------------------------------------
+// MOOD → TAG ALIASES
+// LLM extracts mood. DB has vibe_tags and match_keywords.
+// This maps moods to tags likely in the DB.
+// --------------------------------------------------
+const MOOD_ALIASES = {
+  chill: [
+    "chill",
+    "relaxed",
+    "laid-back",
+    "casual",
+    "cozy",
+    "calm",
+    "warm",
+    "unhurried",
+  ],
+  focused: [
+    "productive",
+    "work-friendly",
+    "focused",
+    "quiet",
+    "study",
+    "serious",
+  ],
+  romantic: [
+    "romantic",
+    "intimate",
+    "cozy",
+    "date-night",
+    "beautiful",
+    "design-led",
+  ],
+  social: ["social", "group", "lively", "fun", "buzzy", "cheerful"],
+  adventurous: [
+    "adventurous",
+    "unique",
+    "offbeat",
+    "hidden gem",
+    "different",
+    "unusual",
+  ],
+  lazy: [
+    "casual",
+    "neighbourhood",
+    "comfortable",
+    "unpretentious",
+    "homey",
+    "local",
+  ],
+  energetic: ["lively", "loud", "buzzy", "social", "energetic", "fun"],
+  celebratory: [
+    "celebration",
+    "special occasion",
+    "fun",
+    "group",
+    "social",
+    "festive",
+  ],
+};
+
+// --------------------------------------------------
+// KEYWORD ALIASES
+// LLM keyword → DB tag vocabulary bridge
+// --------------------------------------------------
+const KEYWORD_ALIASES = {
+  work: ["work-friendly", "productive", "laptop", "wifi", "focused", "work"],
+  study: ["work-friendly", "productive", "laptop", "wifi", "quiet", "study"],
+  quiet: ["quiet", "peaceful", "calm", "silent", "serene", "unhurried"],
+  "filter coffee": [
+    "filter coffee",
+    "coffee",
+    "south indian coffee",
+    "specialty coffee",
+    "kapi",
+  ],
+  coffee: ["coffee", "specialty coffee", "filter coffee", "cafe"],
+  quick: ["quick bites", "fast", "takeaway", "express"],
+  outdoor: [
+    "outdoor seating",
+    "open air",
+    "terrace",
+    "nature",
+    "park",
+    "green",
+  ],
+  date: ["romantic", "cozy", "date-night", "intimate", "couple", "beautiful"],
+  cheap: ["affordable", "value", "budget", "free"],
+  affordable: ["affordable", "value", "budget"],
+  group: ["group", "family", "social", "large table"],
+  romantic: ["romantic", "intimate", "cozy", "date-night"],
+  breakfast: ["breakfast", "morning", "south indian", "tiffin"],
+  beer: ["beer", "craft beer", "microbrewery", "pub", "bar", "drinks"],
+  trek: ["trek", "adventure", "outdoors", "nature", "sunrise", "physical"],
+  exploration: ["adventure", "unique", "offbeat", "outdoors", "nature"],
+  library: ["quiet", "study", "books", "bookstore", "silent", "focused"],
+  workspace: ["work-friendly", "coworking", "laptop", "wifi", "productive"],
+  warm: ["warm", "cozy", "comfort food", "nostalgic", "homey"],
+  nature: ["nature", "green", "park", "outdoor", "peaceful", "lake"],
+  art: ["art", "gallery", "artsy", "creative", "intellectual"],
+  books: ["books", "bookstore", "literary", "reading", "intellectual"],
+};
+
+function expandKeywords(keywords) {
+  const expanded = new Set();
+  keywords.forEach((kw) => {
+    const lower = kw.toLowerCase();
+    expanded.add(lower);
+    const aliases = KEYWORD_ALIASES[lower];
+    if (aliases) aliases.forEach((a) => expanded.add(a));
+  });
+  return Array.from(expanded);
+}
+
+function expandMood(mood) {
+  if (!mood || mood === "unknown") return [];
+  const aliases = MOOD_ALIASES[mood.toLowerCase()];
+  return aliases ? aliases : [mood.toLowerCase()];
+}
+
+// --------------------------------------------------
+// MAIN FUNCTION
 // --------------------------------------------------
 export async function findBestMatch(intent) {
   try {
-    // ── STEP A: Build the base query ──────────────────────────────────────
-    // We start by fetching ALL places, then narrow down.
-    // We use .select('*') to get every column — useful during development.
-    // In production, you'd select only the columns you need.
-    let query = supabase
-      .from("places") // your table name in Supabase
-      .select("*");
+    let query = supabase.from("places").select("*").eq("is_active", true);
 
-    // ── STEP B: Hard Filter — Category ───────────────────────────────────
-    // If the LLM identified a category, only show places of that type.
-    // "cafe" → only cafes, "restaurant" → only restaurants, etc.
-    if (intent.category && intent.category !== "any") {
-      query = query.ilike("category", `%${intent.category}%`);
-      // ilike = case-insensitive LIKE — matches "Cafe", "cafe", "CAFE"
-      // The % wildcards mean "contains this word anywhere"
+    // ── Hard Filter: Category ─────────────────────────────────
+    if (intent.category && intent.category !== "unknown") {
+      const dbCategories = CATEGORY_MAP[intent.category.toLowerCase()];
+      if (dbCategories && dbCategories.length > 0) {
+        query = query.in("category", dbCategories);
+        console.log(
+          `[placesMatcher] Category filter: "${intent.category}" → DB categories: ${dbCategories}`,
+        );
+      }
+      // If no mapping found, skip category filter (don't eliminate everything)
     }
 
-    // ── STEP C: Hard Filter — Budget ─────────────────────────────────────
-    // Convert the LLM's budget word to tier numbers and filter
-    if (intent.budget && BUDGET_TIER_MAP[intent.budget]) {
-      const allowedTiers = BUDGET_TIER_MAP[intent.budget];
-      query = query.in("budget_tier", allowedTiers);
-      // .in() = SQL "WHERE budget_tier IN (1, 2)"
+    // ── Hard Filter: Budget ───────────────────────────────────
+    if (
+      intent.budget &&
+      intent.budget !== "unknown" &&
+      BUDGET_MAP[intent.budget]
+    ) {
+      const allowedBudgets = BUDGET_MAP[intent.budget];
+      query = query.in("budget", allowedBudgets);
+      console.log(
+        `[placesMatcher] Budget filter: "${intent.budget}" → ${allowedBudgets}`,
+      );
     }
 
-    // ── STEP D: Fetch the filtered results ───────────────────────────────
-    // We limit to 20 candidates max — enough to score, not too many to slow things down
     query = query.limit(20);
 
     const { data: candidates, error } = await query;
@@ -80,94 +194,161 @@ export async function findBestMatch(intent) {
       throw new Error("Database query failed: " + error.message);
     }
 
-    // If no candidates found even after relaxed filters, return null
     if (!candidates || candidates.length === 0) {
-      console.log("[placesMatcher] No candidates found for intent:", intent);
-      return null;
+      console.log(
+        "[placesMatcher] No candidates found — relaxing category filter...",
+      );
+
+      // FALLBACK: retry without category filter
+      const { data: fallback, error: fbError } = await supabase
+        .from("places")
+        .select("*")
+        .eq("is_active", true)
+        .limit(20);
+
+      if (fbError || !fallback || fallback.length === 0) return null;
+      return scoreAndPick(fallback, intent);
     }
 
     console.log(
       `[placesMatcher] ${candidates.length} candidates after hard filters`,
     );
-
-    // ── STEP E: Score each candidate ─────────────────────────────────────
-    // For each place, calculate a "match score" based on soft criteria.
-    // Higher score = better match for this user's intent.
-    const scored = candidates.map((place) => {
-      let score = 0;
-
-      // +3 points: vibe_tags overlap
-      // Example: user wants ["quiet", "cozy"], place has ["quiet", "wifi", "cozy"]
-      // Overlap = 2 tags → score += 6
-      if (
-        intent.vibe_tags &&
-        Array.isArray(intent.vibe_tags) &&
-        place.vibe_tags
-      ) {
-        const placeTags = Array.isArray(place.vibe_tags) ? place.vibe_tags : [];
-        const overlap = intent.vibe_tags.filter((tag) =>
-          placeTags.map((t) => t.toLowerCase()).includes(tag.toLowerCase()),
-        );
-        score += overlap.length * 3;
-      }
-
-      // +2 points: noise_level match
-      if (intent.noise_level && place.noise_level) {
-        if (
-          intent.noise_level.toLowerCase() === place.noise_level.toLowerCase()
-        ) {
-          score += 2;
-        }
-      }
-
-      // +2 points: time_of_day match via best_for column
-      // best_for might be like ["morning", "work"] or "morning, evening"
-      if (intent.time_of_day && place.best_for) {
-        const bestFor = Array.isArray(place.best_for)
-          ? place.best_for.join(" ")
-          : String(place.best_for);
-        if (bestFor.toLowerCase().includes(intent.time_of_day.toLowerCase())) {
-          score += 2;
-        }
-      }
-
-      // +1 point: match_keywords overlap (broad keyword matching)
-      if (intent.vibe_tags && place.match_keywords) {
-        const keywords = Array.isArray(place.match_keywords)
-          ? place.match_keywords
-          : String(place.match_keywords).split(",");
-        const keywordHits = intent.vibe_tags.filter((tag) =>
-          keywords
-            .map((k) => k.trim().toLowerCase())
-            .includes(tag.toLowerCase()),
-        );
-        score += keywordHits.length * 1;
-      }
-
-      return { ...place, _score: score }; // attach score to the place object
-    });
-
-    // ── STEP F: Sort by score (highest first) ────────────────────────────
-    scored.sort((a, b) => b._score - a._score);
-
-    // Log scores during development — helpful for tuning
-    console.log(
-      "[placesMatcher] Top 3 scored places:",
-      scored.slice(0, 3).map((p) => ({ name: p.name, score: p._score })),
-    );
-
-    // ── STEP G: Return the SINGLE best match ─────────────────────────────
-    // If top candidates have the same score, pick randomly among them
-    // (avoids always returning the same place for identical queries)
-    const topScore = scored[0]._score;
-    const topTied = scored.filter((p) => p._score === topScore);
-    const winner = topTied[Math.floor(Math.random() * topTied.length)];
-
-    // Remove the internal _score before returning to client
-    const { _score, ...cleanPlace } = winner;
-    return cleanPlace;
+    return scoreAndPick(candidates, intent);
   } catch (err) {
     console.error("[placesMatcher] Unexpected error:", err.message);
     throw err;
   }
+}
+
+// --------------------------------------------------
+// SCORER — separated for reuse in fallback
+// --------------------------------------------------
+function scoreAndPick(candidates, intent) {
+  const expandedKeywords =
+    intent.keywords?.length > 0 ? expandKeywords(intent.keywords) : [];
+
+  const expandedMood = expandMood(intent.mood);
+
+  console.log("[placesMatcher] Expanded keywords:", expandedKeywords);
+  console.log("[placesMatcher] Expanded mood tags:", expandedMood);
+
+  const scored = candidates.map((place) => {
+    let score = 0;
+
+    // ── +5 pts: Exact category match ─────────────────────────
+    if (intent.category && intent.category !== "unknown" && place.category) {
+      const dbCategories = CATEGORY_MAP[intent.category.toLowerCase()] || [];
+      if (dbCategories.includes(place.category)) {
+        score += 5;
+      }
+    }
+
+    // ── +3 pts per vibe_tag match (keywords) ─────────────────
+    if (expandedKeywords.length > 0 && place.vibe_tags) {
+      const placeTags = Array.isArray(place.vibe_tags)
+        ? place.vibe_tags.map((t) => t.toLowerCase())
+        : [];
+      const tagOverlap = expandedKeywords.filter((kw) =>
+        placeTags.includes(kw),
+      );
+      score += tagOverlap.length * 3;
+      if (tagOverlap.length > 0) {
+        console.log(
+          `  [score] ${place.name}: vibe_tag hits → [${tagOverlap}] (+${tagOverlap.length * 3})`,
+        );
+      }
+    }
+
+    // ── +3 pts per vibe_tag match (mood) ─────────────────────
+    if (expandedMood.length > 0 && place.vibe_tags) {
+      const placeTags = Array.isArray(place.vibe_tags)
+        ? place.vibe_tags.map((t) => t.toLowerCase())
+        : [];
+      const moodOverlap = expandedMood.filter((m) => placeTags.includes(m));
+      score += moodOverlap.length * 3;
+      if (moodOverlap.length > 0) {
+        console.log(
+          `  [score] ${place.name}: mood vibe_tag hits → [${moodOverlap}] (+${moodOverlap.length * 3})`,
+        );
+      }
+    }
+
+    // ── +2 pts per match_keyword hit (keywords) ──────────────
+    if (expandedKeywords.length > 0 && place.match_keywords) {
+      const placeKws = Array.isArray(place.match_keywords)
+        ? place.match_keywords.map((k) => k.toLowerCase())
+        : String(place.match_keywords)
+            .split(",")
+            .map((k) => k.trim().toLowerCase());
+      const kwOverlap = expandedKeywords.filter((kw) => placeKws.includes(kw));
+      score += kwOverlap.length * 2;
+      if (kwOverlap.length > 0) {
+        console.log(
+          `  [score] ${place.name}: match_kw hits → [${kwOverlap}] (+${kwOverlap.length * 2})`,
+        );
+      }
+    }
+
+    // ── +2 pts per match_keyword hit (mood) ──────────────────
+    if (expandedMood.length > 0 && place.match_keywords) {
+      const placeKws = Array.isArray(place.match_keywords)
+        ? place.match_keywords.map((k) => k.toLowerCase())
+        : String(place.match_keywords)
+            .split(",")
+            .map((k) => k.trim().toLowerCase());
+      const moodKwOverlap = expandedMood.filter((m) => placeKws.includes(m));
+      score += moodKwOverlap.length * 2;
+      if (moodKwOverlap.length > 0) {
+        console.log(
+          `  [score] ${place.name}: mood match_kw hits → [${moodKwOverlap}] (+${moodKwOverlap.length * 2})`,
+        );
+      }
+    }
+
+    // ── +2 pts: noise_level match ─────────────────────────────
+    if (
+      intent.noise_level &&
+      intent.noise_level !== "unknown" &&
+      place.noise_level
+    ) {
+      if (
+        intent.noise_level.toLowerCase() === place.noise_level.toLowerCase()
+      ) {
+        score += 2;
+      }
+    }
+
+    // ── +1 pt: time_of_day in best_for ───────────────────────
+    if (intent.time_of_day && place.best_for) {
+      const bestFor = Array.isArray(place.best_for)
+        ? place.best_for.join(" ").toLowerCase()
+        : String(place.best_for).toLowerCase();
+      if (bestFor.includes(intent.time_of_day.toLowerCase())) {
+        score += 1;
+      }
+    }
+
+    // ── +1 pt: popularity tiebreaker ─────────────────────────
+    // Among tied places, slightly prefer the more popular one
+    score += (place.popularity_score || 0) / 100;
+
+    return { ...place, _score: score };
+  });
+
+  scored.sort((a, b) => b._score - a._score);
+
+  console.log(
+    "[placesMatcher] Top 5 scored places:",
+    scored
+      .slice(0, 5)
+      .map((p) => ({ name: p.name, score: p._score.toFixed(1) })),
+  );
+
+  // Pick winner — if top scores are within 1 point of each other, randomise
+  const topScore = scored[0]._score;
+  const topTied = scored.filter((p) => p._score >= topScore - 1);
+  const winner = topTied[Math.floor(Math.random() * topTied.length)];
+
+  const { _score, ...cleanPlace } = winner;
+  return cleanPlace;
 }

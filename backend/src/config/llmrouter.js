@@ -52,13 +52,31 @@ async function callGroq(systemPrompt, userPrompt) {
 // Detects if an error from the API is a rate limit (429) error.
 // Both Gemini and Groq use HTTP 429 for rate limiting.
 
+// AFTER — renamed to isRetryableError, catches 503 too:
 function isRateLimitError(error) {
+  // Extract status code — Gemini embeds it inside error.message as JSON
+  let status = error?.status || error?.statusCode;
+
+  // Gemini sometimes throws with the full JSON in error.message
+  // e.g. '{"error":{"code":503,"message":"...","status":"UNAVAILABLE"}}'
+  // We parse it out to get the real code
+  if (!status && error?.message) {
+    try {
+      const parsed = JSON.parse(error.message);
+      status = parsed?.error?.code;
+    } catch {
+      // not JSON — that's fine, check string patterns below
+    }
+  }
+
   return (
-    error?.status === 429 ||
-    error?.statusCode === 429 ||
+    status === 429 ||
+    status === 503 || // ← THE FIX: service unavailable = retry next provider
     error?.message?.toLowerCase().includes("rate limit") ||
     error?.message?.toLowerCase().includes("quota") ||
-    error?.message?.toLowerCase().includes("resource_exhausted")
+    error?.message?.toLowerCase().includes("resource_exhausted") ||
+    error?.message?.toLowerCase().includes("unavailable") ||
+    error?.message?.toLowerCase().includes("high demand")
   );
 }
 

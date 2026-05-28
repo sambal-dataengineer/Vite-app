@@ -73,7 +73,18 @@ Extract these fields:
    Valid values: "lazy", "energetic", "romantic", "social", "focused", "adventurous", "chill", "celebratory", "unknown"
 
 2. "category" — What type of place are they looking for?
-   Valid values: "cafe", "restaurant", "bar", "park", "activity", "shopping", "dessert", "unknown"
+   Valid values: "cafe", "restaurant", "bar", "park", "outdoors", "activity", "work", "study", "unknown"
+
+   Mapping guide:
+   - cafe, coffee shop, coffee → "cafe"
+   - restaurant, food, eat, hungry → "restaurant"
+   - bar, pub, drinks, beer, cocktails → "bar"
+   - park, garden, lake, walk, fresh air → "park"
+   - trek, hike, nature trip, outdoor adventure, cycling → "outdoors"
+   - escape room, pottery, planetarium, board games, unique experience → "activity"
+   - work from cafe, need wifi, coworking, laptop → "work"
+   - study, library, books, read, deep focus → "study"
+   - If unclear → "unknown" 
 
 3. "budget" — What price range do they seem to want?
    Valid values: "low" (under ₹300/person), "medium" (₹300–₹800/person), "high" (above ₹800/person), "unknown"
